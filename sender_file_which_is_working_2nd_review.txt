@@ -1,0 +1,67 @@
+import numpy as np
+from pylsl import StreamInlet, resolve_stream
+from scipy.signal import welch, butter, lfilter
+from pythonosc import udp_client
+
+# --- SETTINGS ---
+RECEIVER_IP = "100.108.22.92"  # Your personal laptop's IP
+RECEIVER_PORT = 5006           # The new, open port
+OSC_ADDRESS = "/eeg/features"
+
+SAMPLING_RATE = 250
+BANDS = {
+    'Delta': [1, 4],
+    'Theta': [4, 8],
+    'Alpha': [8, 13],
+    'Beta': [13, 30],
+    'Gamma': [30, 45]
+}
+
+def bandpass_filter(data, lowcut, highcut, fs, order=5):
+    nyq = 0.5 * fs
+    low = lowcut / nyq
+    high = highcut / nyq
+    b, a = butter(order, [low, high], btype='band')
+    return lfilter(b, a, data, axis=0)
+
+def get_band_power(data, band, fs):
+    freqs, psd = welch(data, fs, nperseg=fs)
+    idx_band = np.logical_and(freqs >= BANDS[band][0], freqs <= BANDS[band][1])
+    return np.sum(psd[idx_band])
+
+def main():
+    print("Looking for an EEG stream...")
+    streams = resolve_stream('type', 'EEG')
+    if not streams:
+        print("🛑 No EEG stream found!")
+        return
+    
+    inlet = StreamInlet(streams[0])
+    print("✅ Connected to EEG stream.")
+
+    client = udp_client.SimpleUDPClient(RECEIVER_IP, RECEIVER_PORT)
+    print(f"✅ Streaming 5 features to {RECEIVER_IP}:{RECEIVER_PORT}")
+    
+    print("\n--- Sending Data (Press Ctrl+C to stop) ---")
+
+    try:
+        while True:
+            samples, _ = inlet.pull_chunk(timeout=1.5, max_samples=SAMPLING_RATE)
+            if samples:
+                channel_data = np.array(samples)[:, 0]
+                filtered = bandpass_filter(channel_data, 1, 45, SAMPLING_RATE)
+                
+                delta = get_band_power(filtered, 'Delta', SAMPLING_RATE)
+                theta = get_band_power(filtered, 'Theta', SAMPLING_RATE)
+                alpha = get_band_power(filtered, 'Alpha', SAMPLING_RATE)
+                beta = get_band_power(filtered, 'Beta', SAMPLING_RATE)
+                gamma = get_band_power(filtered, 'Gamma', SAMPLING_RATE)
+
+                print(f"Sending -> D:{delta:.2f} T:{theta:.2f} A:{alpha:.2f} B:{beta:.2f} G:{gamma:.2f}")
+                client.send_message(OSC_ADDRESS, [delta, theta, alpha, beta, gamma])
+
+    except KeyboardInterrupt:
+        print("\nStream sender stopped.")
+
+if _name_ == "_main_":
+    main()
